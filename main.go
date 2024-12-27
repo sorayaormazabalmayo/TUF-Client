@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	stdlog "log"
@@ -29,7 +31,21 @@ const (
 	nameOfFile           = "index.json"
 )
 
+type indexInfo struct {
+	Length int64 `json:"length"`
+	Hashes struct {
+		Sha256 string `json:"sha256"`
+	} `json:"hashes"`
+	Version string `json:"version"`
+}
+
 func main() {
+
+	// Define the desired layout
+	layout := "2006.01.02-15.04.05"
+
+	// This is the first step for setting the initial configuration.
+
 	// set logger to stdout with info level
 	metadata.SetLogger(stdr.New(stdlog.New(os.Stdout, "client_example", stdlog.LstdFlags)))
 	stdr.SetVerbosity(verbosity)
@@ -48,43 +64,158 @@ func main() {
 		log.Error(err, "Trust-On-First-Use failed")
 	}
 
+	// Download the target index considering trusted targets role
+	targetIndexFile, foundDesiredTargetIndexLocally, err := DownloadTargetIndex(metadataDir)
+
+	if err != nil {
+		log.Error(err, "Download index file failed")
+	}
+
+	if foundDesiredTargetIndexLocally == 0 {
+
+		err = os.WriteFile(filepath.Join(metadataDir, nameOfFile), targetIndexFile, 0750)
+		if err != nil {
+			log.Error(err, "Error writing to file")
+		}
+
+	} else {
+		fmt.Printf("\nThe local index file is the most updated one \n")
+	}
+
+	// Getting the latest version of the desired file
+
+	// Map to hold the top-level JSON keys
+	var data map[string]indexInfo
+
+	// Parse JSON into the map
+	err = json.Unmarshal([]byte(targetIndexFile), &data)
+	if err != nil {
+		fmt.Printf("Error parsing JSON: %v", err)
+	}
+	// Latest version considering the index.json downloaded by TUF
+
+	indexVersion := data["nebula-standalone"].Version
+
+	//hashLatestVersion := data["nebula-standalone"].Hashes
+
+	// Service account key file
+	serviceAccountKeyPath := "/home/sormazabal/artifact-downloader-key.json"
+
+	// Construct Artifact Registry URL
+	url := fmt.Sprintf("https://artifactregistry.googleapis.com/download/v1/projects/polished-medium-445107-i9/locations/europe-southwest1/repositories/nebula-storage/files/nebula-package:%s:nebula-standalone:download?alt=media", indexVersion)
+
+	fmt.Printf("Downloading binary from: %s\n", url)
+
+	// Download the artifact without specifying the file type
+	err = downloadArtifact(serviceAccountKeyPath, url)
+	if err != nil {
+		fmt.Printf("Failed to download binary: %v\n", err)
+		os.Exit(1)
+	}
+
+	verficationAnswer := verifyingDownloadedFile(string(targetIndexFile), "tmp/downloaded-file")
+
+	if verficationAnswer == 1 {
+		fmt.Printf("\U0001F7E2Binary downloaded successfully!\U0001F7E2\n")
+	} else {
+		fmt.Printf("\U0001F534There has been an error while downloading the file. The hashed do not match\U0001F534\n")
+
+	}
+
+	currentVersion := data["nebula-standalone"].Version
+
+	// Printing expiration date
+	PrintExpirationDate(layout, currentVersion)
+
+	fmt.Printf("\nThe current nebula-standalone version is: %s \n", currentVersion)
+
+	time.Sleep(time.Second * 60)
+
 	// The updater needs to be looking for new updates every x time
 	for {
 		// download the desired target
-		targetFile, foundDesiredTargetLocally, err := DownloadTarget(metadataDir)
+		targetIndexFile, foundDesiredTargetIndexLocally, err := DownloadTargetIndex(metadataDir)
 
 		if err != nil {
-			log.Error(err, "Download target file failed")
+			log.Error(err, "Download index file failed")
 		}
 
-		if foundDesiredTargetLocally == 0 {
+		if foundDesiredTargetIndexLocally == 0 {
 
-			err = os.WriteFile(filepath.Join(metadataDir, nameOfFile), targetFile, 0750)
+			err = os.WriteFile(filepath.Join(metadataDir, nameOfFile), targetIndexFile, 0750)
 			if err != nil {
 				log.Error(err, "Error writing to file")
 			}
 
+			// Verifying that the index.json's version is latest than the one that is currently running
+
+			// Map to hold the top-level JSON keys
+			var data map[string]indexInfo
+
+			// Parse JSON into the map
+			err = json.Unmarshal([]byte(targetIndexFile), &data)
+			if err != nil {
+				fmt.Printf("\U0001F534Error parsing JSON: %v\U0001F534", err)
+			}
+			// Latest version considering the index.json downloaded by TUF
+
+			indexVersion := data["nebula-standalone"].Version
+
+			newProductVersion := NewVersion(currentVersion, indexVersion, layout)
+
+			if newProductVersion == 1 {
+				fmt.Printf("There is a new product of nebula-standalone\n")
+			} else {
+				fmt.Printf("There is no new product\n")
+			}
+
+			// Getting user answer
+
+			userAnswer := gettingUserAnswer()
+
+			if userAnswer == 1 {
+
+				//hashLatestVersion := data["nebula-standalone"].Hashes
+
+				// Service account key file
+				serviceAccountKeyPath := "/home/sormazabal/artifact-downloader-key.json"
+
+				// Construct Artifact Registry URL
+				url := fmt.Sprintf("https://artifactregistry.googleapis.com/download/v1/projects/polished-medium-445107-i9/locations/europe-southwest1/repositories/nebula-storage/files/nebula-package:%s:nebula-standalone:download?alt=media", indexVersion)
+
+				fmt.Printf("Downloading binary from: %s\n", url)
+
+				// Download the artifact without specifying the file type
+				err = downloadArtifact(serviceAccountKeyPath, url)
+				if err != nil {
+					fmt.Printf("\U0001F534Failed to download binary: %v\U0001F534\n", err)
+					os.Exit(1)
+				}
+
+				verficationAnswer := verifyingDownloadedFile(string(targetIndexFile), "tmp/downloaded-file")
+
+				if verficationAnswer == 1 {
+					fmt.Printf("\U0001F7E2Binary downloaded successfully!\U0001F7E2\n")
+				} else {
+					fmt.Printf("\U0001F534There has been an error while downloading the file. The hashed do not match\n\U0001F534")
+
+				}
+
+			} else {
+
+				fmt.Printf("\u23F0Remember that you have an update pending.\u23F0\n")
+
+				// Telling the user the expiration date of the current version
+
+				PrintExpirationDate(layout, currentVersion)
+
+			}
+
 		} else {
-			fmt.Printf("\nThe local desired target is the most updated one \n")
+			fmt.Printf("\nThe local index file is the most updated one\n")
 		}
 
-		// Service account key file
-		serviceAccountKeyPath := "/home/sormazabal/artifact-downloader-key.json"
-
-		// Construct Artifact Registry URL
-		url := "https://artifactregistry.googleapis.com/download/v1/projects/polished-medium-445107-i9/locations/europe-southwest1/repositories/nebula-storage/files/nebula-package:2024.12.26-14.03.18:nebula-standalone:download?alt=media"
-
-		fmt.Printf("Downloading binary from: %s\n", url)
-
-		// Download the artifact without specifying the file type
-		err = downloadArtifact(serviceAccountKeyPath, url)
-		if err != nil {
-			fmt.Printf("Failed to download binary: %v\n", err)
-			os.Exit(1)
-		}
-
-		fmt.Println("Binary downloaded successfully!")
-		time.Sleep(time.Second * 5)
+		time.Sleep(time.Second * 60)
 
 	}
 }
@@ -156,10 +287,11 @@ func InitTrustOnFirstUse(metadataDir string) error {
 	return nil
 }
 
-// DownloadTarget downloads the target file using Updater. The Updater refreshes the top-level metadata,
+// DownloadTargetIndex downloads the target file using Updater. The Updater refreshes the top-level metadata,
 // get the target information, verifies if the target is already cached, and in case it
 // is not cached, downloads the target file.
-func DownloadTarget(localMetadataDir string) ([]byte, int, error) {
+
+func DownloadTargetIndex(localMetadataDir string) ([]byte, int, error) {
 	// log := metadata.GetLogger()
 
 	rootBytes, err := os.ReadFile(filepath.Join(localMetadataDir, "root.json"))
@@ -191,12 +323,12 @@ func DownloadTarget(localMetadataDir string) ([]byte, int, error) {
 
 	ti, err := up.GetTargetInfo(nameOfFile)
 	if err != nil {
-		return nil, 0, fmt.Errorf("getting info for target \"%s\": %w", nameOfFile, err)
+		return nil, 0, fmt.Errorf("getting info for target index \"%s\": %w", nameOfFile, err)
 	}
 
 	path, tb, err := up.FindCachedTarget(ti, filepath.Join(localMetadataDir, nameOfFile))
 	if err != nil {
-		return nil, 0, fmt.Errorf("getting target cache: %w", err)
+		return nil, 0, fmt.Errorf("getting target index cache: %w", err)
 	}
 
 	// fmt.Printf("\n%s\n", tb)
@@ -208,19 +340,15 @@ func DownloadTarget(localMetadataDir string) ([]byte, int, error) {
 		return tb, 1, nil
 	}
 
-	fmt.Printf("\nThere is a new update:\n")
-	userAnswer := gettingUserAnswer()
+	// fmt.Printf("\nThere is a new update:\n")
 
-	if userAnswer == 1 {
-		// Download of target is needed
-		_, tb, err = up.DownloadTarget(ti, "", "")
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to download target file %s - %w", nameOfFile, err)
-		}
-
-		return tb, 0, nil
+	// Download of target is needed
+	_, tb, err = up.DownloadTarget(ti, "", "")
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to download target index file %s - %w", nameOfFile, err)
 	}
-	return tb, 1, nil
+
+	return tb, 0, nil
 }
 
 func gettingUserAnswer() int {
@@ -276,7 +404,7 @@ func downloadArtifact(keyFilePath, url string) error {
 
 	// Determine the file name from the Content-Disposition header or use a default name
 	contentDisposition := resp.Header.Get("Content-Disposition")
-	fileName := "downloaded-file"
+	fileName := "tmp/downloaded-file"
 	if contentDisposition != "" {
 		_, params, err := mime.ParseMediaType(contentDisposition)
 		if err == nil {
@@ -303,8 +431,121 @@ func downloadArtifact(keyFilePath, url string) error {
 func readFile(path string) []byte {
 	content, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Printf("Error reading file %s: %v\n", path, err)
+		fmt.Printf("\U0001F534Error reading file %s: %v\U0001F534\n", path, err)
 		os.Exit(1)
 	}
 	return content
+}
+
+func NewVersion(currentVersion, indexVersion, layout string) int {
+
+	var newVersion int
+
+	currentVersionParsed, err := time.Parse(layout, currentVersion)
+
+	if err != nil {
+		fmt.Printf("\U0001F534Error parsing version of the current version running: %v\U0001F534\n", err)
+	}
+
+	indexVersionParsed, err := time.Parse(layout, indexVersion)
+
+	if err != nil {
+		fmt.Printf("\U0001F534Error parsing the version that the index.json indicates: %v\U0001F534\n", err)
+	}
+
+	if currentVersionParsed.Before(indexVersionParsed) {
+		newVersion = 1
+	} else if currentVersionParsed.After(indexVersionParsed) {
+		newVersion = 0
+	} else {
+		newVersion = 0
+	}
+	return newVersion
+}
+
+// Printing the expiratin date of a version
+
+func PrintExpirationDate(layout, currentVersion string) {
+
+	// Parse the string into a time.Time object
+	currentVersionParsed, err := time.Parse(layout, currentVersion)
+
+	if err != nil {
+		fmt.Printf("\U0001F534Error parsing the current version date: %v\U0001F534\n", err)
+		return
+	}
+
+	expirationDateOfCurrentVersion := currentVersionParsed.AddDate(2, 0, 0)
+
+	currentDate := time.Now()
+
+	validTimeOfCurrentVersion := expirationDateOfCurrentVersion.Sub(currentDate)
+
+	totalHours := int(validTimeOfCurrentVersion.Hours())
+	totalDays := totalHours / 24
+	years := totalDays / 365
+	days := totalDays % 365
+	hours := totalHours % 24
+	minutes := int(validTimeOfCurrentVersion.Minutes()) % 60
+	seconds := int(validTimeOfCurrentVersion.Seconds()) % 60
+
+	fmt.Printf("\u23F0The current version will expire in %d years, %d days, %d hours, %d minutes, and %d seconds\u23F0\n",
+		years, days, hours, minutes, seconds)
+
+}
+
+func verifyingDownloadedFile(indexPath, DonwloadedFilePath string) int {
+
+	// Hash of the index.json file
+	var data map[string]indexInfo
+
+	// Parse JSON into the map
+	err := json.Unmarshal([]byte(indexPath), &data)
+	if err != nil {
+		fmt.Printf("\U0001F534Error parsing JSON: %v\U0001F534", err)
+	}
+	// Latest version considering the index.json downloaded by TUF
+
+	indexHash := data["nebula-standalone"].Hashes.Sha256
+
+	// Computing the hash of the downloaded file
+
+	// Compute the SHA256 hash
+	downloadedFilehash, err := ComputeSHA256(DonwloadedFilePath)
+	if err != nil {
+		fmt.Printf("\U0001F534Error computing hash: %v\U0001F534\n", err)
+		return 0
+	}
+
+	if indexHash == downloadedFilehash {
+
+		fmt.Printf("\U0001F7E2The target file has been downloaded successfully!\U0001F7E2\n")
+		return 1
+	} else {
+		fmt.Printf("\U0001F534There has been an error while downloading the file\U0001F534\n")
+		return 0
+	}
+
+}
+
+func ComputeSHA256(filePath string) (string, error) {
+	// Open the file
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	// Create a SHA256 hash object
+	hasher := sha256.New()
+
+	// Copy the file contents into the hasher
+	// This reads the file in chunks to handle large files efficiently
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", fmt.Errorf("failed to compute hash: %w", err)
+	}
+
+	// Get the final hash as a byte slice and convert to a hexadecimal string
+	hash := hasher.Sum(nil)
+	return fmt.Sprintf("%x", hash), nil
 }
